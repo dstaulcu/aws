@@ -94,3 +94,8 @@ def lambda_handler(event, context):
             r.raise_for_status()
         except requests.exceptions.HTTPError as err:
             raise SystemExit(err)
+
+
+    
+    
+
