@@ -4,6 +4,7 @@ import requests
 import boto3
 from botocore.exceptions import ClientError
 import os
+from datetime import datetime
 
 def get_secret(secret_name, region_name):
 
@@ -30,6 +31,13 @@ def get_secret(secret_name, region_name):
 
 def lambda_handler(event, context):
 
+    # verify we can access ca_certs file in trust_stores layer
+    ca_certs = '/opt/trust_stores/readme.md'
+    if not os.path.isfile(ca_certs):
+        print('ERROR - Path to ca_certs file "{}" not found. Exiting.'.format(ca_certs))
+        exit(1)
+
+        
     # get splunk hec token secret value from aws secrets service
     secret = get_secret(secret_name='splunk_hec_token', region_name='us-east-1')
     splunk_hec_token = secret['splunk_hec_token']
@@ -38,46 +46,51 @@ def lambda_handler(event, context):
     splunk_uri = 'https://splunk_host:8088/services/collector/event'    
     headers = {'Authorization': 'Splunk '+ splunk_hec_token}    
     
-    # construct required splunk metadata to post with event
-    payload = {
-        'index':'test', 
-        'host':'host_tbd', 
-        'source':'source_tbd', 
-        'sourcetype':'sourcetype_tbd'
-    }
-    
-    # handle varying event structures depending on trigger for function
-    if 'Records' in event:
-        # derive from s3 event data 
-        for record in event['Records']:
-            my_event = {
-                'eventTime':record['eventTime'],
-                'eventSource':record['eventSource'],
-                'eventName':record['eventName'],
-                'sourceIPAddress':record['requestParameters']['sourceIPAddress'],
-                'bucket_name':record['s3']['bucket']['name'],
-                'object_key':record['s3']['object']['key'],
-                'object_size':record['s3']['object']['size'],
-                'object_eTag':record['s3']['object']['eTag']
-            }
-    else:
-        # derive from lambda event data
+    # check event structure to derive trigger type for function 
+    if not 'Records' in event:
+        
+        # contruct print statement from event received from lambda test trigger
         my_event = json.dumps(event, indent=None)
+        print('lambda test trigger event: {}'.format(my_event))
 
-    # update payload with derived event
-    payload.update({'event': my_event})    
-    
-    # print('input for event to post to splunk http event collector - splunk_uri: {} and payload: {}'.format(splunk_uri, payload))
-    
-    # lets see if we can access the readme.md file in the trust_store layer!
-    file_path = '/opt/trust_stores/readme.md'
-    if os.path.isfile(file_path):
-        print('file_path: {} exists!'.format(file_path))
+        
     else:
-        print('file_path: {} not found!'.format(file_path))
-
+        
+        # construct event for splunk from event received from s3 trigger. 
+        # note: despite Records being iterable only 1 member is expected
     
-    '''
-    r = requests.post(splunk_uri, data=json.dumps(payload), headers=headers, verify=True)
-    print("Splunk hec status code: {}, status text: {}".format(r.status_code, r.text))
-    '''
+        my_event = {
+            'eventTime':event['Records'][0]['eventTime'],
+            'eventSource':event['Records'][0]['eventSource'],
+            'eventName':event['Records'][0]['eventName'],
+            'sourceIPAddress':event['Records'][0]['requestParameters']['sourceIPAddress'],
+            'bucket_name':event['Records'][0]['s3']['bucket']['name'],
+            'object_key':event['Records'][0]['s3']['object']['key'],
+            'object_size':event['Records'][0]['s3']['object']['size'],
+            'object_eTag':event['Records'][0]['s3']['object']['eTag']
+        }
+        
+        # convert eventTime from string to datetime and then epoch for use in Splunk _time field
+        eventTime_utc = datetime.strptime(my_event['eventTime'], "%Y-%m-%dT%H:%M:%S.%fZ")
+        eventTime_epoch = (eventTime_utc - datetime(1970, 1, 1)).total_seconds()
+        
+        # construct required splunk metadata to post with event
+        payload = {
+            'index':'tbd', 
+            '_time': eventTime_epoch,
+#            'host': tbd,
+            'source':'tbd', 
+            'sourcetype':'tbd'
+        }
+        
+        # update payload with derived event
+        payload.update({'event': my_event})
+        
+        # print('DEBUG - payload: {}'.format(payload))
+        
+        # post the event to splunk http event collector endpoint
+        try:
+            r = requests.post(splunk_uri, data=json.dumps(payload), headers=headers, verify=ca_certs)
+            r.raise_for_status()
+        except requests.exceptions.HTTPError as err:
+            raise SystemExit(err)
